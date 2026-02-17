@@ -1,5 +1,6 @@
 import chess
 import torch
+from typing import Optional
 
 PIECE_TYPES = [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING]
 
@@ -12,8 +13,10 @@ def board_to_tensor(board_or_fen):
     """
     if isinstance(board_or_fen, str):
         board = chess.Board(board_or_fen)
-    else:
+    elif isinstance(board_or_fen, chess.Board):
         board = board_or_fen
+    else:
+        raise ValueError(f"Expected str or chess.Board, got {type(board_or_fen)}")
 
     planes = []
     for color in [chess.WHITE, chess.BLACK]:
@@ -35,8 +38,6 @@ def select_move_and_logprob(policy, board, temperature: float = 1.0, device: Opt
     for each legal move, sample one move from the softmax distribution, and
     return (chosen_move, log_prob, moves, probs_tensor).
     """
-    from typing import Optional as _Optional
-
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     moves = list(board.legal_moves)
     if len(moves) == 0:
