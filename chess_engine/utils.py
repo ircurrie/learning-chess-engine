@@ -34,25 +34,28 @@ def board_to_tensor(board_or_fen):
 
 
 def select_move_and_logprob(policy, board, temperature: float = 1.0, device: Optional[str] = None):
-    """Given a `policy` (PolicyNet) and a `chess.Board`, score resulting boards
-    for each legal move, sample one move from the softmax distribution, and
-    return (chosen_move, log_prob, moves, probs_tensor).
+    """Given a `policy` (PolicyNet) and a `chess.Board`, score each legal move
+    by the destination square score, sample one move from the softmax distribution,
+    and return (chosen_move, log_prob, moves, probs_tensor).
     """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     moves = list(board.legal_moves)
     if len(moves) == 0:
         return None, None, moves, None
 
-    # build batch of next-state tensors
-    next_tensors = []
-    for mv in moves:
-        b2 = board.copy()
-        b2.push(mv)
-        next_tensors.append(board_to_tensor(b2))
+    # Score the current board state
+    board_tensor = board_to_tensor(board).to(device).unsqueeze(0)  # (1, 768)
+    square_scores = policy(board_tensor).squeeze(0)  # (768,)
 
-    xb = torch.stack(next_tensors).to(device)
-    scores = policy(xb)  # (n_moves,)
-    probs = torch.softmax(scores / max(1e-8, temperature), dim=0)
+    # Score each legal move by the destination square
+    move_scores = []
+    for mv in moves:
+        dest_sq = mv.to_square
+        move_scores.append(square_scores[dest_sq])
+    move_scores = torch.stack(move_scores)
+
+    # Softmax over legal moves and sample
+    probs = torch.softmax(move_scores / max(1e-8, temperature), dim=0)
     dist = torch.distributions.Categorical(probs)
     idx = dist.sample()
     chosen = moves[int(idx.item())]

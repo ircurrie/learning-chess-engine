@@ -1,5 +1,5 @@
-chess
-
 # Engine training deps
 python-chess>=1.999
 torch>=1.12
+flask>=2.0
+numpy>=1.21.0

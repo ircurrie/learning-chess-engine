@@ -80,14 +80,23 @@ def main():
                 break
 
             # log where move came from and optional value estimate
+            # Print SAN/description safely (compute SAN before push may raise if move illegal)
+            try:
+                san_str = board.san(engine_move)
+            except Exception:
+                try:
+                    san_str = engine_move.uci()
+                except Exception:
+                    san_str = str(engine_move)
+
             if value_net is not None:
                 try:
                     val = get_value_estimate(board, value_net)
-                    print(f"Engine ({used}) plays: {board.san(engine_move)}  |  value={val:.3f}")
+                    print(f"Engine ({used}) plays: {san_str}  |  value={val:.3f}")
                 except Exception:
-                    print(f"Engine ({used}) plays: {board.san(engine_move)}")
+                    print(f"Engine ({used}) plays: {san_str}")
             else:
-                print(f"Engine ({used}) plays: {board.san(engine_move)}")
+                print(f"Engine ({used}) plays: {san_str}")
 
             board.push(engine_move)
 

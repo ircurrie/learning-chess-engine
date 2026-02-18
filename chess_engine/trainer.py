@@ -1,5 +1,6 @@
 from typing import Optional, List, Tuple
 import torch
+import chess
 from .model import ValueNet, PolicyNet
 from .dataset import ChessDataset
 import torch.nn as nn
@@ -25,12 +26,13 @@ class Trainer:
         self.policy.to(self.device)
         self.value.to(self.device)
 
-    def self_play_episode(self, temperature: float = 1.0, max_moves: int = 512) -> Tuple[List[Tuple[torch.Tensor, torch.Tensor, bool]], float]:
+    def self_play_episode(self, temperature: float = 1.0, max_moves: int = 512) -> Tuple[List[Tuple[torch.Tensor, torch.Tensor, bool, chess.Move]], float, dict]:
         """Generate one self-play game.
 
         Returns:
-            traj: list of tuples (state_tensor, log_prob, is_white_to_move)
+            traj: list of tuples (state_tensor, log_prob, is_white_to_move, move)
             outcome: +1 for white win, -1 for black win, 0 for draw
+            info: dict with keys `length`, `captures`, `material_swing`
         """
         import chess
         from .utils import board_to_tensor, select_move_and_logprob
@@ -38,13 +40,17 @@ class Trainer:
         board = chess.Board()
         traj = []
         moves_made = 0
+        captures = 0
         while not board.is_game_over() and moves_made < max_moves:
             state_tensor = board_to_tensor(board).to(self.device)
             chosen, logp, moves, probs = select_move_and_logprob(self.policy, board, temperature=temperature, device=self.device)
             if chosen is None:
                 break
             is_white = board.turn  # True for white to move
-            traj.append((state_tensor, logp, is_white))
+            # Count captures (board.is_capture uses the pre-move board)
+            if board.is_capture(chosen):
+                captures += 1
+            traj.append((state_tensor, logp, is_white, chosen))
             board.push(chosen)
             moves_made += 1
 
@@ -55,31 +61,127 @@ class Trainer:
             z = -1.0
         else:
             z = 0.0
-        return traj, z
+        # Compute material swing (absolute difference white - black)
+        white_mat = 0.0
+        black_mat = 0.0
+        values = {
+            chess.PAWN: 1.0,
+            chess.KNIGHT: 3.0,
+            chess.BISHOP: 3.0,
+            chess.ROOK: 5.0,
+            chess.QUEEN: 9.0,
+            chess.KING: 0.0,
+        }
+        for sq, piece in board.piece_map().items():
+            val = values.get(piece.piece_type, 0.0)
+            if piece.color:
+                white_mat += val
+            else:
+                black_mat += val
 
-    def train_self_play(self, iterations: int = 100, games_per_iter: int = 8, lr_policy: float = 1e-4, lr_value: float = 1e-3, temperature: float = 1.0):
+        material_swing = abs(white_mat - black_mat)
+        info = {"length": moves_made, "captures": captures, "material_swing": material_swing}
+        return traj, z, info
+
+    def train_self_play(self, iterations: int = 100, games_per_iter: int = 8, lr_policy: float = 1e-3, lr_value: float = 1e-3, temperature: float = 1.0, illegal_penalty: float = -10.0, discount_factor: float = 0.99):
         """Run repeated self-play and training cycles.
 
-        This function collects `games_per_iter` games each iteration, then
-        updates the policy and value networks on the collected trajectories.
+        This function collects `games_per_iter` games each iteration, then:
+        - Updates ValueNet to predict discounted cumulative returns (game outcomes with time decay)
+        - Updates PolicyNet to predict which destination squares lead to high-value positions,
+          with severe penalties for illegal moves.
+        
+        Args:
+            discount_factor: gamma for discounted returns (0.99 = value decays 1% per move)
         """
+        import chess
+        from .utils import board_to_tensor
+
         policy_opt = torch.optim.Adam(self.policy.parameters(), lr=lr_policy)
         value_opt = torch.optim.Adam(self.value.parameters(), lr=lr_value)
         mse = nn.MSELoss()
 
         for it in range(1, iterations + 1):
             all_states = []
-            all_logps = []
             all_returns = []
+            all_policy_targets = []  # (batch, 768) targets for policy
+            outcomes = {"white_wins": 0, "black_wins": 0, "draws": 0}
+
+            # accumulate per-iteration stats
+            total_length = 0
+            total_captures = 0
+            total_material_swing = 0.0
 
             for g in range(games_per_iter):
-                traj, z = self.self_play_episode(temperature=temperature)
-                for state, logp, is_white in traj:
-                    # Return from the perspective of the player to move at that state
+                traj, z, info = self.self_play_episode(temperature=temperature)
+                total_length += info.get("length", 0)
+                total_captures += info.get("captures", 0)
+                total_material_swing += info.get("material_swing", 0.0)
+                # Track outcome
+                if z == 1.0:
+                    outcomes["white_wins"] += 1
+                elif z == -1.0:
+                    outcomes["black_wins"] += 1
+                else:
+                    outcomes["draws"] += 1
+
+                # Compute discounted cumulative returns working backward through trajectory
+                discounted_returns = []
+                cumulative_return = 0.0
+                for state, logp, is_white, move in reversed(traj):
+                    # From this player's perspective
                     ret = z if is_white else -z
+                    cumulative_return = ret + discount_factor * cumulative_return
+                    discounted_returns.append(cumulative_return)
+                discounted_returns.reverse()
+
+                # Reconstruct game moves
+                board = chess.Board()
+                for (state, logp, is_white, move), disc_ret in zip(traj, discounted_returns):
                     all_states.append(state)
-                    all_logps.append(logp)
-                    all_returns.append(torch.tensor(ret, dtype=torch.float32, device=self.device))
+                    all_returns.append(torch.tensor(disc_ret, dtype=torch.float32, device=self.device))
+
+                    # Build policy target: 768-dim vector with penalties for illegal, values for legal
+                    policy_target = torch.full((768,), illegal_penalty, dtype=torch.float32, device=self.device)
+
+                    # Get legal moves and evaluate their resulting states.
+                    # If a resulting state is terminal, override the value with
+                    # the forced game outcome (+1 white win, -1 black win, 0 draw)
+                    # from the perspective of the player to move in that next state.
+                    legal_moves = list(board.legal_moves)
+                    next_boards = []
+                    nonterminal_moves = []  # list of (move, dest_sq) for non-terminal next states
+                    for mv in legal_moves:
+                        b2 = board.copy()
+                        b2.push(mv)
+                        dest_sq = mv.to_square
+                        if b2.is_game_over():
+                            res = b2.result(claim_draw=True)
+                            if res == "1-0":
+                                z2 = 1.0
+                            elif res == "0-1":
+                                z2 = -1.0
+                            else:
+                                z2 = 0.0
+                            # Value from perspective of the player to move in b2
+                            val = z2 if b2.turn else -z2
+                            policy_target[dest_sq] = val
+                        else:
+                            next_boards.append(board_to_tensor(b2).to(self.device))
+                            nonterminal_moves.append((mv, dest_sq))
+
+                    # Evaluate non-terminal next states with the value network (detached for target)
+                    if len(next_boards) > 0:
+                        next_states = torch.stack(next_boards)
+                        with torch.no_grad():
+                            next_values = self.value(next_states)
+                            next_values = next_values.view(-1)
+                        # Assign values to the corresponding destination squares
+                        for k, (_mv, dest_sq) in enumerate(nonterminal_moves):
+                            policy_target[dest_sq] = next_values[k]
+
+                    all_policy_targets.append(policy_target)
+                    board.push(move)
 
             if len(all_states) == 0:
                 print(f"Iter {it}: no training data collected")
@@ -87,7 +189,7 @@ class Trainer:
 
             states = torch.stack(all_states)
             returns = torch.stack(all_returns)
-            logps = torch.stack(all_logps)
+            policy_targets = torch.stack(all_policy_targets)
 
             # Update value network
             self.value.train()
@@ -97,17 +199,30 @@ class Trainer:
             value_loss.backward()
             value_opt.step()
 
-            # Update policy network with REINFORCE using value as baseline
+            # Update policy network: learn to score legal moves by their resulting value
             self.policy.train()
             policy_opt.zero_grad()
-            with torch.no_grad():
-                baseline = self.value(states)
-            advantages = returns - baseline
-            policy_loss = -(logps * advantages).mean()
+            policy_preds = self.policy(states)  # (batch, 768)
+            policy_loss = mse(policy_preds, policy_targets)
             policy_loss.backward()
             policy_opt.step()
 
-            print(f"Iter {it}/{iterations}: games={games_per_iter} states={len(all_states)} value_loss={value_loss.item():.4f} policy_loss={policy_loss.item():.4f}")
+            # Compute outcome percentages
+            total_games = sum(outcomes.values())
+            if total_games > 0:
+                white_pct = 100.0 * outcomes["white_wins"] / total_games
+                black_pct = 100.0 * outcomes["black_wins"] / total_games
+                draw_pct = 100.0 * outcomes["draws"] / total_games
+            else:
+                white_pct = black_pct = draw_pct = 0.0
+
+            # Compute average game stats
+            games_counted = games_per_iter if games_per_iter > 0 else 1
+            avg_len = total_length / games_counted
+            avg_caps = total_captures / games_counted
+            avg_mat = total_material_swing / games_counted
+
+            print(f"Iter {it}/{iterations}: games={games_per_iter} states={len(all_states)} value_loss={value_loss.item():.4f} policy_loss={policy_loss.item():.4f} | W:{white_pct:.1f}% B:{black_pct:.1f}% D:{draw_pct:.1f}% | avg_len={avg_len:.1f} avg_caps={avg_caps:.2f} avg_mat_swing={avg_mat:.2f}")
 
     def save(self, prefix: str):
         torch.save(self.policy.state_dict(), prefix + "_policy.pt")

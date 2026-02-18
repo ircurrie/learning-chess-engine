@@ -21,10 +21,11 @@ class ValueNet(nn.Module):
 
 
 class PolicyNet(nn.Module):
-    """Policy model that scores board states (higher = more desirable).
+    """Policy model that scores each square on the board (higher = more desirable destination).
 
-    For action selection we score the resulting board for each legal move and form
-    a softmax over those scores to obtain a distribution over moves.
+    Input: board state (batch, 768)
+    Output: (batch, 768) scores, one per square. For move selection we apply softmax
+    over the scores of legal move destinations.
     """
 
     def __init__(self, input_size: int = 768, hidden: int = 256):
@@ -34,10 +35,9 @@ class PolicyNet(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden, hidden),
             nn.ReLU(),
-            nn.Linear(hidden, 1),
+            nn.Linear(hidden, input_size),  # output 768 scores (one per square)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: (batch, 768) -> returns (batch,)
-        out = self.net(x).squeeze(-1)
-        return out
+        # x shape: (batch, 768) -> returns (batch, 768)
+        return self.net(x)

@@ -82,8 +82,29 @@ def get_model_move(board: chess.Board, policy: PolicyNet, temperature: float = 1
 
     Falls back to `None` when no legal moves are available.
     """
-    chosen, _, _, _ = select_move_and_logprob(policy, board, temperature=temperature, device=device)
-    return chosen
+    chosen, _, moves, _ = select_move_and_logprob(policy, board, temperature=temperature, device=device)
+    # Safety: ensure chosen is legal in current board. If not, try to recover.
+    legal = list(board.legal_moves)
+    if chosen in legal:
+        return chosen
+    # Log unexpected illegal selection for debugging
+    try:
+        print("[policy-warning] chosen move not legal for board:\n", board.fen())
+        print("[policy-warning] chosen:", getattr(chosen, 'uci', lambda: str(chosen))())
+        print("[policy-warning] legal moves:", [m.uci() for m in legal])
+    except Exception:
+        pass
+    # If chosen is not in legal moves (unexpected), try to find a move with same UCI
+    if chosen is not None:
+        try:
+            uc = chosen.uci()
+            for m in legal:
+                if m.uci() == uc:
+                    return m
+        except Exception:
+            pass
+    # Fall back to a random legal move (or None if no legal moves)
+    return (random.choice(legal) if legal else None)
 
 
 def get_value_estimate(board: chess.Board, value_net: ValueNet, device: Optional[str] = None) -> float:
@@ -94,6 +115,33 @@ def get_value_estimate(board: chess.Board, value_net: ValueNet, device: Optional
     with torch.no_grad():
         v = value_net(x.unsqueeze(0)).item()
     return float(v)
+
+
+def get_top_moves(board: chess.Board, policy: PolicyNet, device: Optional[str] = None, top_n: int = 10) -> list:
+    """Return the top N moves from the policy network for a given board.
+    
+    Returns list of tuples: (move, score, san).
+    """
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    x = board_to_tensor(board).to(device).unsqueeze(0)
+    policy.eval()
+    with torch.no_grad():
+        square_scores = policy(x).squeeze(0)  # (768,)
+    
+    moves = list(board.legal_moves)
+    move_scores = []
+    for mv in moves:
+        dest_sq = mv.to_square
+        score = square_scores[dest_sq].item()
+        try:
+            san = board.san(mv)
+        except Exception:
+            san = mv.uci()
+        move_scores.append((mv, score, san))
+    
+    # Sort by score descending
+    move_scores.sort(key=lambda x: x[1], reverse=True)
+    return move_scores[:top_n]
 
 
 def get_engine_move(board: chess.Board, depth: int = 2, policy: Optional[PolicyNet] = None, temperature: float = 1.0, device: Optional[str] = None) -> chess.Move | None:

@@ -1,0 +1,110 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Chess Engine UI</title>
+    <style>
+      body { font-family: sans-serif; margin: 12px; }
+      .board { margin: 12px 0; }
+      .controls { margin: 12px 0; }
+      .flash { color: darkred; margin-bottom: 12px; }
+      .value-bar {
+        width: 300px;
+        height: 30px;
+        border: 1px solid #ccc;
+        position: relative;
+        margin: 12px 0;
+        background: linear-gradient(to right, #000 0%, #888 50%, #fff 100%);
+        display: flex;
+        align-items: center;
+      }
+      .value-indicator {
+        width: 3px;
+        height: 100%;
+        background-color: red;
+        position: absolute;
+      }
+      .value-label {
+        position: absolute;
+        width: 100%;
+        text-align: center;
+        color: #333;
+        font-weight: bold;
+        font-size: 12px;
+        text-shadow: 1px 1px 2px rgba(255,255,255,0.8);
+      }
+      form { margin: 8px 0; }
+      input[type="text"], input[type="number"] { padding: 4px; }
+      button { padding: 6px 12px; }
+    </style>
+  </head>
+  <body>
+    <h1>Chess Engine UI</h1>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <div class="flash">
+          {% for msg in messages %}
+            <div>{{ msg }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <div class="board">
+      {{ board_svg | safe }}
+    </div>
+
+    {% if value is not none %}
+      <div style="margin: 12px 0;">
+        <strong>Position Evaluation (ValueNet):</strong>
+        <div class="value-bar">
+          <div class="value-label">
+            {% if value >= 0 %}
+              White +{{ '%.2f'|format(value) }}
+            {% else %}
+              Black +{{ '%.2f'|format(-value) }}
+            {% endif %}
+          </div>
+          <div class="value-indicator" style="left: {{ (value + 1) * 150 - 1.5 }}px;"></div>
+        </div>
+      </div>
+    {% endif %}
+
+    <div class="controls">
+      <form method="post" action="/move">
+        <input name="move" placeholder="UCI or SAN move (e2e4 or Nf3)" size="20" />
+        <button type="submit">Play Move</button>
+      </form>
+
+      <form method="post" action="/engine">
+        <label>depth: <input name="depth" value="2" size="2" /></label>
+        <label>temperature: <input name="temperature" value="1.0" size="4" /></label>
+        <button type="submit">Engine Move</button>
+      </form>
+
+      {% if top_moves %}
+        <div style="margin: 8px 0 12px 0;">
+          <strong>Top Moves (Policy Network):</strong>
+          <ol style="max-width: 300px; margin-top:6px;">
+            {% for move, score, san in top_moves %}
+              <li>{{ san }} <code style="color: #666; font-size: 11px;">{{ '%.3f'|format(score) }}</code></li>
+            {% endfor %}
+          </ol>
+        </div>
+      {% endif %}
+
+      <form method="post" action="/reset">
+        <button type="submit">Reset Board</button>
+      </form>
+
+      <form method="post" action="/load">
+        <input name="prefix" placeholder="model prefix (models/run2)" size="20" />
+        <button type="submit">Load Models</button>
+      </form>
+
+      <div style="margin-top: 12px;">
+        <strong>FEN:</strong> <code>{{ fen }}</code>
+      </div>
+    </div>
+  </body>
+</html>
