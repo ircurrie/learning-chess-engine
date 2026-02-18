@@ -6,10 +6,11 @@ PIECE_TYPES = [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, 
 
 
 def board_to_tensor(board_or_fen):
-    """Convert a `chess.Board` or FEN string into a 768-dim float tensor (12x8x8).
+    """Convert a `chess.Board` or FEN string into a tensor containing piece planes
+    plus a `turn` feature. Returns a torch.FloatTensor shape (769,).
 
-    Planes order: [white pawn, white knight, ..., white king, black pawn, ..., black king].
-    Returns a torch.FloatTensor shape (768,).
+    Plane order: [white pawn, white knight, ..., white king, black pawn, ..., black king]
+    followed by a single scalar: +1.0 if white to move, -1.0 if black to move.
     """
     if isinstance(board_or_fen, str):
         board = chess.Board(board_or_fen)
@@ -28,8 +29,10 @@ def board_to_tensor(board_or_fen):
                 if piece == ptype and piece_color == color:
                     plane[sq] = 1.0
             planes.append(plane)
-    # flatten planes in square order
+    # flatten planes in square order and append turn feature
     flat = [v for plane in planes for v in plane]
+    turn_val = 1.0 if board.turn == chess.WHITE else -1.0
+    flat.append(turn_val)
     return torch.tensor(flat, dtype=torch.float32)
 
 
@@ -43,15 +46,15 @@ def select_move_and_logprob(policy, board, temperature: float = 1.0, device: Opt
     if len(moves) == 0:
         return None, None, moves, None
 
-    # Score the current board state
-    board_tensor = board_to_tensor(board).to(device).unsqueeze(0)  # (1, 768)
-    square_scores = policy(board_tensor).squeeze(0)  # (768,)
+    # Score the current board state: policy now returns per-move logits of size 4096
+    board_tensor = board_to_tensor(board).to(device).unsqueeze(0)  # (1, 769)
+    move_logits = policy(board_tensor).squeeze(0)  # (4096,)
 
-    # Score each legal move by the destination square
+    # Score each legal move by the (from,to) index = from*64 + to
     move_scores = []
     for mv in moves:
-        dest_sq = mv.to_square
-        move_scores.append(square_scores[dest_sq])
+        idx = mv.from_square * 64 + mv.to_square
+        move_scores.append(move_logits[idx])
     move_scores = torch.stack(move_scores)
 
     # Softmax over legal moves and sample

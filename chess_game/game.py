@@ -126,13 +126,13 @@ def get_top_moves(board: chess.Board, policy: PolicyNet, device: Optional[str] =
     x = board_to_tensor(board).to(device).unsqueeze(0)
     policy.eval()
     with torch.no_grad():
-        square_scores = policy(x).squeeze(0)  # (768,)
+        move_logits = policy(x).squeeze(0)  # (4096,)
     
     moves = list(board.legal_moves)
     move_scores = []
     for mv in moves:
-        dest_sq = mv.to_square
-        score = square_scores[dest_sq].item()
+        idx = mv.from_square * 64 + mv.to_square
+        score = move_logits[idx].item()
         try:
             san = board.san(mv)
         except Exception:
